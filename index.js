@@ -9,7 +9,7 @@ const PHONE_NUMBER_ID = process.env.PHONE_NUMBER_ID;
 const AI_API_URL = process.env.AI_API_URL;
 const SUPABASE_ANON_KEY = process.env.SUPABASE_ANON_KEY;
 
-app.get('/webhook', (req, res) =&gt; {
+app.get('/webhook', (req, res) => {
   if (req.query['hub.mode'] === 'subscribe' && req.query['hub.verify_token'] === VERIFY_TOKEN) {
     res.status(200).send(req.query['hub.challenge']);
   } else {
@@ -17,7 +17,7 @@ app.get('/webhook', (req, res) =&gt; {
   }
 });
 
-app.post('/webhook', async (req, res) =&gt; {
+app.post('/webhook', async (req, res) => {
   try {
     const entry = req.body.entry?.[0]?.changes?.[0]?.value;
     const message = entry?.messages?.[0];
@@ -25,26 +25,42 @@ app.post('/webhook', async (req, res) =&gt; {
     if (message && message.text) {
       const numeroClient = message.from;
       const texteClient = message.text.body;
-      console.log('Message de ' + numeroClient + ': ' + texteClient);
+      console.log(`Message de ${numeroClient}: ${texteClient}`);
 
+      if (!AI_API_URL) {
+        console.error("AI_API_URL manquant dans les variables d'environnement");
+        return res.sendStatus(200);
+      }
+
+      // 1. Appel vers ton IA / Supabase
       const reponseIA = await fetch(AI_API_URL, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          'Authorization': 'Bearer ' + SUPABASE_ANON_KEY,
+          'Authorization': `Bearer ${SUPABASE_ANON_KEY}`,
           'apikey': SUPABASE_ANON_KEY
         },
         body: JSON.stringify({ message: texteClient, phone: numeroClient })
-      }).then(function(r) { return r.json(); }).then(function(data) {
-        return data.reply || data.response || data.message || '';
+      })
+     .then(r => r.json())
+     .then(data => data.reply || data.response || data.message || '')
+     .catch(err => {
+        console.error("Erreur appel IA:", err);
+        return "Désolé, je rencontre un petit souci technique. Un conseiller va vous répondre.";
       });
 
-      console.log('Reponse IA: ' + reponseIA);
+      console.log(`Reponse IA: ${reponseIA}`);
 
-      await fetch('https://graph.facebook.com/v19.0/' + PHONE_NUMBER_ID + '/messages', {
+      if (!reponseIA) {
+        console.log("Pas de réponse IA, on ne renvoie rien");
+        return res.sendStatus(200);
+      }
+
+      // 2. Renvoi sur WhatsApp
+      await fetch(`https://graph.facebook.com/v19.0/${PHONE_NUMBER_ID}/messages`, {
         method: 'POST',
         headers: {
-          'Authorization': 'Bearer ' + WHATSAPP_TOKEN,
+          'Authorization': `Bearer ${WHATSAPP_TOKEN}`,
           'Content-Type': 'application/json'
         },
         body: JSON.stringify({
@@ -56,26 +72,16 @@ app.post('/webhook', async (req, res) =&gt; {
     }
     res.sendStatus(200);
   } catch (e) {
-    console.error(e);
+    console.error("Erreur webhook:", e);
     res.sendStatus(200);
   }
 });
 
-app.get('/', function(req, res) { res.send('Webhook en ligne!'); });
-app.listen(process.env.PORT || 10000, function() { console.log('Serveur demarre'); });
-📄 Fichier 2 : package.json
-{
-  "name": "webhook-whatsapp",
-  "version": "1.0.0",
-  "main": "index.js",
-  "scripts": {
-    "start": "node index.js"
-  },
-  "dependencies": {
-    "body-parser": "^1.20.2",
-    "express": "^4.18.2"
-  },
-  "engines": {
-    "node": "&gt;=18.0.0"
-  }
-}
+app.get('/', (req, res) => {
+  res.send('Webhook en ligne!');
+});
+
+const PORT = process.env.PORT || 10000;
+app.listen(PORT, () => {
+  console.log(`Serveur demarre sur le port ${PORT}`);
+});
