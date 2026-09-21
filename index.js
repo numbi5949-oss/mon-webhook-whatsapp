@@ -4,11 +4,14 @@ const app = express();
 app.use(bodyParser.json());
 
 const VERIFY_TOKEN = "lubum2026";
+
+// On les lit depuis Render Environment
 const WHATSAPP_TOKEN = process.env.WHATSAPP_TOKEN;
-const PHONE_NUMBER_ID = process.env.PHONE_NUMBER_ID;
-const AI_API_URL = process.env.AI_API_URL;
+const PHONE_NUMBER_ID = process.env.PHONE_NUMBER_ID || "1239730502564843";
+const AI_API_URL = process.env.AI_API_URL || "https://gyyfjzolylqhoxftsigy.supabase.co/functions/v1/whatsapp-public";
 const SUPABASE_ANON_KEY = process.env.SUPABASE_ANON_KEY;
 
+// Vérification Meta
 app.get('/webhook', (req, res) => {
   if (req.query['hub.mode'] === 'subscribe' && req.query['hub.verify_token'] === VERIFY_TOKEN) {
     res.status(200).send(req.query['hub.challenge']);
@@ -17,6 +20,7 @@ app.get('/webhook', (req, res) => {
   }
 });
 
+// Réception + Appel Lydia + Renvoi WhatsApp
 app.post('/webhook', async (req, res) => {
   try {
     const entry = req.body.entry?.[0]?.changes?.[0]?.value;
@@ -27,12 +31,7 @@ app.post('/webhook', async (req, res) => {
       const texteClient = message.text.body;
       console.log(`Message de ${numeroClient}: ${texteClient}`);
 
-      if (!AI_API_URL) {
-        console.error("AI_API_URL manquant dans les variables d'environnement");
-        return res.sendStatus(200);
-      }
-
-      // 1. Appel vers ton IA / Supabase
+      // 1. Appeler Lydia sur Supabase
       const reponseIA = await fetch(AI_API_URL, {
         method: 'POST',
         headers: {
@@ -43,21 +42,21 @@ app.post('/webhook', async (req, res) => {
         body: JSON.stringify({ message: texteClient, phone: numeroClient })
       })
      .then(r => r.json())
-     .then(data => data.reply || data.response || data.message || '')
+     .then(data => data.reply || data.response || data.message || "")
      .catch(err => {
-        console.error("Erreur appel IA:", err);
-        return "Désolé, je rencontre un petit souci technique. Un conseiller va vous répondre.";
+        console.error("Erreur appel Lydia:", err);
+        return "";
       });
 
-      console.log(`Reponse IA: ${reponseIA}`);
+      console.log(`Reponse Lydia: ${reponseIA}`);
 
       if (!reponseIA) {
-        console.log("Pas de réponse IA, on ne renvoie rien");
+        console.log("Lydia n'a pas renvoyé de réponse");
         return res.sendStatus(200);
       }
 
-      // 2. Renvoi sur WhatsApp
-      await fetch(`https://graph.facebook.com/v19.0/${PHONE_NUMBER_ID}/messages`, {
+      // 2. Renvoyer sur WhatsApp via Meta
+      const waResult = await fetch(`https://graph.facebook.com/v19.0/${PHONE_NUMBER_ID}/messages`, {
         method: 'POST',
         headers: {
           'Authorization': `Bearer ${WHATSAPP_TOKEN}`,
@@ -68,8 +67,11 @@ app.post('/webhook', async (req, res) => {
           to: numeroClient,
           text: { body: reponseIA }
         })
-      });
+      }).then(r => r.json());
+
+      console.log("Envoi WhatsApp:", JSON.stringify(waResult));
     }
+
     res.sendStatus(200);
   } catch (e) {
     console.error("Erreur webhook:", e);
@@ -78,7 +80,7 @@ app.post('/webhook', async (req, res) => {
 });
 
 app.get('/', (req, res) => {
-  res.send('Webhook en ligne!');
+  res.send('Webhook en ligne! Lydia connectee.');
 });
 
 const PORT = process.env.PORT || 10000;
