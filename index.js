@@ -1,118 +1,118 @@
+/**
+ * Webhook intermédiaire — EDUC-COMPTA-AFRICA
+ *
+ * RÔLE UNIQUE : recevoir les événements Meta WhatsApp et les transmettre
+ *               TELS QUELS à l'Edge Function Supabase (whatsapp-public / Lydia).
+ *
+ * RÈGLES CRITIQUES :
+ *   1. On transmet le payload Meta BRUT — PAS {message, phone}
+ *   2. On await fetch(Supabase) AVANT de répondre 200 à Meta
+ *   3. On N'envoie PAS sur WhatsApp depuis Render — whatsapp-public le fait
+ *   4. On ne lit PAS data.reply — whatsapp-public retourne "EVENT_RECEIVED"
+ *
+ * Variables d'environnement sur Render :
+ *   VERIFY_TOKEN      = lubum2026
+ *   SUPABASE_URL      = https://gyyfjzolylqhoxftsigy.supabase.co/functions/v1/whatsapp-public
+ *   SUPABASE_ANON_KEY = eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...
+ */
+
 const express = require('express');
 const app = express();
-app.use(express.json());
+app.use(express.json({ limit: '1mb' }));
 
-// --- CONFIG ---
-const VERIFY_TOKEN = process.env.VERIFY_TOKEN || "lubum2026";
-const WHATSAPP_TOKEN = process.env.WHATSAPP_TOKEN;
-const PHONE_NUMBER_ID = process.env.PHONE_NUMBER_ID || "1239730502564843";
-const AI_API_URL = process.env.AI_API_URL || "https://gyyfjzolylqhoxftsigy.supabase.co/functions/v1/whatsapp-public";
-const SUPABASE_ANON_KEY = process.env.SUPABASE_ANON_KEY;
+const VERIFY_TOKEN      = (process.env.VERIFY_TOKEN || 'lubum2026').trim();
+const SUPABASE_URL      = (process.env.SUPABASE_URL || 'https://gyyfjzolylqhoxftsigy.supabase.co/functions/v1/whatsapp-public').trim();
+const SUPABASE_ANON_KEY = (process.env.SUPABASE_ANON_KEY || '').trim();
+const PORT              = process.env.PORT              || 10000;
 
-console.log("Config chargee:", {
-  hasToken:!!WHATSAPP_TOKEN,
-  phoneId: PHONE_NUMBER_ID,
-  aiUrl: AI_API_URL,
-  hasSupabaseKey:!!SUPABASE_ANON_KEY
+console.log('Config chargee:', {
+  verifyToken: VERIFY_TOKEN,
+  supabaseUrl: SUPABASE_URL,
+  hasAnonKey: !!SUPABASE_ANON_KEY,
+  anonKeyPreview: SUPABASE_ANON_KEY ? SUPABASE_ANON_KEY.slice(0, 25) + '...' : 'MANQUANTE',
+  anonKeyLength: SUPABASE_ANON_KEY ? SUPABASE_ANON_KEY.length : 0
 });
 
-// Verification webhook pour Meta
+// Sante
+app.get('/', (req, res) => res.send('Webhook en ligne! Lydia connectee.'));
+
+// GET : verification Meta
 app.get('/webhook', (req, res) => {
-  if (req.query['hub.mode'] === 'subscribe' && req.query['hub.verify_token'] === VERIFY_TOKEN) {
-    console.log("Webhook verifie!");
-    res.status(200).send(req.query['hub.challenge']);
-  } else {
-    res.sendStatus(403);
+  const mode      = req.query['hub.mode'];
+  const token     = req.query['hub.verify_token'];
+  const challenge = req.query['hub.challenge'];
+  console.log('[VERIFY] mode=' + mode + ' token_ok=' + (token === VERIFY_TOKEN));
+  if (mode === 'subscribe' && token === VERIFY_TOKEN && challenge) {
+    console.log('[VERIFY] OK');
+    return res.status(200).send(challenge);
   }
+  return res.sendStatus(403);
 });
 
-// Reception des messages
+// POST : reception Meta → transmission Supabase
+// CRITIQUE : await AVANT res.sendStatus(200)
 app.post('/webhook', async (req, res) => {
-  try {
-    const value = req.body.entry?.[0]?.changes?.[0]?.value;
-    const message = value?.messages?.[0];
+  const body = req.body;
 
-    if (!message ||!message.text) {
+  if (!body || body.object !== 'whatsapp_business_account') {
+    console.log('[POST] objet ignore:', body && body.object);
+    return res.sendStatus(200);
+  }
+
+  if (!SUPABASE_ANON_KEY) {
+    console.error('[POST] SUPABASE_ANON_KEY MANQUANTE — ajouter dans Render > Environment');
+    return res.sendStatus(200);
+  }
+
+  console.log('[TRANSMIT] -> Supabase:', JSON.stringify(body).slice(0, 300));
+
+  try {
+    // Nettoyage critique : Render ajoute parfois un \n ou espace invisible qui cause
+    // l'erreur "Auth header is not 'Bearer {token}'"
+    const cleanKey = SUPABASE_ANON_KEY.replace(/[\r\n\s]/g, '').trim();
+    const cleanUrl = SUPABASE_URL.replace(/[\r\n\s]/g, '').trim();
+    
+    if (!cleanKey) {
+      console.error('[TRANSMIT] SUPABASE_ANON_KEY vide apres trim');
       return res.sendStatus(200);
     }
 
-    const from = message.from;
-    const text = message.text.body;
-    console.log(`[1] Message de ${from}: ${text}`);
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 18000);
 
-    // On repond 200 a Meta IMMEDIATEMENT (obligatoire, sinon Meta re-envoie 3 fois)
-    res.sendStatus(200);
+    const response = await fetch(cleanUrl, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': 'Bearer ' + cleanKey,
+        'apikey': cleanKey,
+      },
+      body: JSON.stringify(body),
+      signal: controller.signal,
+    });
 
-    // --- TRAITEMENT EN ARRIERE-PLAN ---
-    let reply = "";
+    clearTimeout(timeoutId);
 
-    try {
-      const supaRes = await fetch(AI_API_URL, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${SUPABASE_ANON_KEY.trim()}`,
-          'apikey': SUPABASE_ANON_KEY.trim()
-        },
-        body: JSON.stringify({ message: text, phone: from })
-      });
+    const text = await response.text().catch(() => '');
+    console.log('[TRANSMIT] Supabase ' + response.status + ': ' + text.slice(0, 500));
 
-      const raw = await supaRes.text();
-      console.log(`[2] Supabase [${supaRes.status}]: ${raw}`);
-
-      try {
-        const data = JSON.parse(raw);
-        reply = data.reply || data.response || data.message || "";
-      } catch {
-        reply = raw;
-      }
-
-    } catch (e) {
-      console.error("[2-ERREUR] Supabase:", e.message);
-      reply = "Désolé, je rencontre un souci technique. Un conseiller va vous répondre.";
+    if (response.status === 401) {
+      console.error('[TRANSMIT] 401 = Cle ANON invalide ou expiree. Va sur Supabase > Project Settings > API > copie la nouvelle anon public key et colle-la dans Render > Environment > SUPABASE_ANON_KEY');
     }
 
-    if (!reply) {
-      console.log("[3] Pas de reponse IA, on arrete");
-      return;
-    }
-
-    // Envoi WhatsApp
-    if (!WHATSAPP_TOKEN ||!PHONE_NUMBER_ID) {
-      console.error("[3-ERREUR] WHATSAPP_TOKEN ou PHONE_NUMBER_ID manquant sur Render");
-      return;
-    }
-
-    try {
-      const waRes = await fetch(`https://graph.facebook.com/v19.0/${PHONE_NUMBER_ID}/messages`, {
-        method: 'POST',
-        headers: {
-          'Authorization': `Bearer ${WHATSAPP_TOKEN.trim()}`,
-          'Content-Type': 'application/json'
-        },
-        body: JSON.stringify({
-          messaging_product: 'whatsapp',
-          to: from,
-          text: { body: reply }
-        })
-      });
-
-      const waRaw = await waRes.text();
-      console.log(`[3] WhatsApp [${waRes.status}]: ${waRaw}`);
-
-    } catch (e) {
-      console.error("[3-ERREUR] WhatsApp:", e.message);
-    }
-
-  } catch (e) {
-    console.error("Erreur globale webhook:", e);
-    // On a deja repondu 200 plus haut, pas besoin de re-repondre
+  } catch (err) {
+    const isAbort = err && (err.name === 'AbortError' || err.name === 'TimeoutError');
+    const msg = isAbort
+      ? 'Timeout 18s (Lydia a mis plus de 18s, mais on va quand meme repondre 200 a Meta pour eviter le retry)'
+      : ((err && err.message) || String(err));
+    console.error('[TRANSMIT] Erreur:', msg);
   }
+
+  // On repond 200 a Meta APRES que Supabase ait traite (ou apres timeout)
+  // C'est le fix de Medo : await d'abord, res.sendStatus ensuite
+  res.sendStatus(200);
 });
 
-app.get('/', (req, res) => {
-  res.send('Webhook Lydia en ligne - OK');
+app.listen(PORT, () => {
+  console.log('Serveur demarre sur le port ' + PORT);
 });
-
-const PORT = process.env.PORT || 10000;
-app.listen(PORT, () => console.log(`Serveur demarre sur ${PORT}`));
